@@ -1,0 +1,15 @@
+source: GheeHean/kakiya-dev agents/vector_search_agent.py
+ref: 71459f6341b47762403d28c2fd6b3ec9b004bd87
+lines_per_chunk: 120
+chunk_00: 1-120
+chunk_01: 121-240
+chunk_02: 241-360
+chunk_03: 361-480
+chunk_04: 481-600
+chunk_05: 601-720
+chunk_06: 721-840
+chunk_07: 841-960
+chunk_08: 961-1080
+chunk_09: 1081-1200
+chunk_10: 1201-1320
+chunk_11: 1321-1439
