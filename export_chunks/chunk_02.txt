@@ -1,0 +1,120 @@
+        return True
+    return not is_out_of_corpus_signal(decomposed.get("out_of_corpus_category"))
+
+
+def _is_confirmed_in_corpus(category: Any, decomposed: Any) -> bool:
+    """Story 11.19 (AC1) — the SOLE in-corpus authority both the FLOOR gate
+    (``in_corpus_backfill``) and the DIGNITY suppression consult. A query is
+    CONFIRMED in-corpus when:
+
+      - the mapped Title-Case Supabase ``category`` (computed once in
+        ``_run_async_impl``) is non-None and in ``CATEGORY_MAPPING.values()`` — the
+        floor's existing in-corpus test (the WEAK-but-necessary mapped-category
+        check; it deliberately does NOT require ``filter_strict``, so F1's floor
+        keeps widening ``filter_strict=False`` in-corpus queries); AND
+      - the decomposition carries no out-of-corpus signal (the shared
+        ``_has_no_out_of_corpus_signal`` — the NEW exclusion that closes UC-CR2's
+        common case at the floor and lets the dignity side suppress F1 without
+        requiring ``filter_strict``).
+
+    Compares the Title-Case ``category`` against ``CATEGORY_MAPPING.values()``
+    (Title-Case) — NOT the lowercase-singular ``CATEGORY_MAPPING_VALUES`` (the R2
+    dead-floor trap: ``"Monitors" in CATEGORY_MAPPING_VALUES`` is always False).
+    """
+    if category is None or category not in CATEGORY_MAPPING.values():
+        return False
+    return _has_no_out_of_corpus_signal(decomposed)
+
+
+def _is_in_corpus_filter_strict(decomposed: Any) -> bool:
+    """Story 11.16 AC #3 — True when the Stage-0.5 decomposition is a CONFIRMED
+    in-corpus, hard-filtered query: ``filter_strict`` is True AND a
+    ``type='category'`` constraint whose (lowercased) value is in
+    ``CATEGORY_MAPPING_VALUES`` AND ``out_of_corpus_category`` is falsy.
+
+    Such a query is a retrieval-quality situation (the corpus HAS this category),
+    never an out-of-corpus refusal — so the post-``vector_search`` dignity-gate
+    predicate must NOT fire on it regardless of the top-1 cosine value. A structural
+    guard independent of (and additive to) the AC2 cosine floor. Reuses the
+    module-local ``_read_decomposed_category``.
+
+    Story 11.19 (R2): this predicate KEEPS its own body — it keys off the lowercased
+    decomposition-CONSTRAINT value vs the canonical singulars ``CATEGORY_MAPPING_VALUES``,
+    which DIVERGES from ``_is_confirmed_in_corpus`` (mapped Title-Case ``category`` vs
+    ``CATEGORY_MAPPING.values()``) for extended ``CATEGORY_MAPPING`` keys
+    (``"gaming laptop"``, ``"smartphone"``, ``"laptops"`` — keys, not values). It is
+    NOT re-expressed as ``_is_confirmed_in_corpus(...) AND filter_strict``. It shares
+    ONLY the out-of-corpus exclusion (``_has_no_out_of_corpus_signal``) with
+    ``_is_confirmed_in_corpus`` — the AC1 invariant is "ONE definition of the
+    out-of-corpus exclusion, inherited by both," not one monolithic predicate. Its
+    truth table is UNCHANGED from 11.16 for canonical inputs.
+
+    R9 (accepted trade-off): if Stage 0.5 MISclassifies a genuinely out-of-corpus
+    query as an in-corpus category + ``filter_strict=True``, this guard suppresses
+    the ALTERNATIVE backstop for that query. Accepted because the PRIMARY Stage-0.5
+    ``out_of_corpus_category`` signal is the main out-of-corpus catch; the right
+    remediation layer for such a misclassification is the Stage-0.5 prompt, not this
+    backstop.
+    """
+    if not isinstance(decomposed, dict):
+        return False
+    if decomposed.get("filter_strict") is not True:
+        return False
+    if not _has_no_out_of_corpus_signal(decomposed):
+        return False
+    category = _read_decomposed_category(decomposed)
+    return isinstance(category, str) and category.lower() in CATEGORY_MAPPING_VALUES
+
+
+def _load_embedding_model():
+    """Load embedding model. Caller stores result in self._embedding_model for process-lifetime caching."""
+    from sentence_transformers import SentenceTransformer
+
+    model = SentenceTransformer(EMBEDDING_MODEL_NAME, trust_remote_code=True)
+    dims = model.get_sentence_embedding_dimension()
+    if dims != EXPECTED_DIMS:
+        # DW-214 — EmbeddingDimensionError subclasses BOTH
+        # VectorSearchConfigurationError (so classify_vector_search_failure
+        # names this "configuration") AND RuntimeError (so every existing
+        # `except RuntimeError` / `pytest.raises(RuntimeError)` caller stays
+        # green — see tools/vector_search_errors.py). Message unchanged.
+        raise EmbeddingDimensionError(
+            f"Expected {EXPECTED_DIMS}-dim embeddings, got {dims}"
+        )
+    return model
+
+
+def _normalize_dedupe_str(raw: Any) -> tuple[str, bool]:
+    """P2/DW-502 — normalize a raw ``parent_asin`` / ``spec_highlight`` value
+    for the ``(parent, spec)`` dedupe key. Returns ``(normalized, dropped)``.
+
+    Reads ``raw`` directly (never ``raw or ""`` first) so a FALSY non-str
+    value (``[]``, ``{}``, ``0``, ``False``) is still recognized as
+    malformed: ``raw or ""`` would silently convert it to ``""`` before any
+    ``isinstance`` check ever saw the original type, so the caller's drop
+    counter undercounted (P2 finding — reproduced with ``parent_asin=[]``
+    logging zero drops while neutralizing the value). ``None`` normalizes to
+    ``""`` WITHOUT reporting a drop — it is the normal "absent" value, not
+    malformed data. Any other non-``str`` type — falsy or truthy — normalizes
+    to ``""`` and reports a drop.
+    """
+    if raw is None:
+        return "", False
+    if isinstance(raw, str):
+        return raw, False
+    return "", True
+
+
+def _extract_merge_keys(p: dict) -> tuple[str, str, str | None, int]:
+    """Extract and normalize parent_asin, spec_highlight, and asin for merge deduplication.
+
+    Returns (parent, spec, asin, dropped_non_str_key_increment).
+    DW-502 — a non-``str`` ``parent_asin`` / ``spec_highlight`` / ``asin``
+    (e.g. a list or dict from malformed upstream data) cannot key a ``set``
+    and would raise ``TypeError: unhashable type`` on ``.add``. Each is
+    treated as ABSENT rather than raised on: a non-str ``parent_asin`` falls
+    through to the asin-level fallback exactly like a null/empty one; a
+    non-str ``spec_highlight`` keys as ``""``; a non-str ``asin`` is skipped
+    (never added to ``seen_asins``). Counted in ``dropped_non_str_key`` and
+    logged.
+    """
